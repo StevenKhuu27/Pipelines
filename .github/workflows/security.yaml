@@ -1,0 +1,127 @@
+name: Security Testing Pipeline Templates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Run on a schedule if needed
+  # schedule:
+  #   - cron: '0 0 * * 0' 
+
+jobs:
+  aikido-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect new vulnerabilities
+        uses: AikidoSec/github-actions-workflow@v1.0.13
+        with:
+            secret-key: ${{ secrets.AIKIDO_SECRET_KEY }}
+            fail-on-timeout: true
+            fail-on-dependency-scan: true
+            fail-on-sast-scan: false
+            fail-on-iac-scan: false
+            minimum-severity: 'CRITICAL'
+            timeout-seconds: 180
+            post-scan-status-comment: 'off'
+            post-sast-review-comments: 'off'
+            github-token: ${{ secrets.GITHUB_TOKEN }}
+  sast-codeql:
+  # This can also be set up as a default github scanning https://docs.github.com/en/code-security/code-scanning/enabling-code-scanning/configuring-default-setup-for-code-scanning
+  # https://github.com/github/codeql-action/tree/v3
+    name: Codeql SAST Scan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      matrix:
+        language: [ 'javascript', 'python' ] # Add more as needed
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+  sast-semgrep:
+    name: Semgrep SAST Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: "auto"
+
+          
+  dependency-check:
+    name: Python Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python audit (pip-audit)
+        if: exists('requirements.txt')
+        run: |
+          pip install pip-audit
+          pip-audit
+
+      - name: NPM audit
+        if: exists('package.json')
+        run: |
+          npm install
+          npm audit --audit-level=moderate
+  dast-owasp-zap:
+    name: DAST Scan (OWASP ZAP)
+    runs-on: ubuntu-latest
+    needs: [sast-codeql]
+    steps:
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: 'http://localhost:3000' # replace with your dev env or staging URL
+        continue-on-error: true
+      - name: ZAP Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          docker_name: 'ghcr.io/zaproxy/zaproxy:stable'
+          target: 'https://www.zaproxy.org'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+  secrets-scan:
+    name: Secret Scanning with truffleHog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run truffleHog
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          scanArguments: '--json --regex --entropy=True .'
+  git-guardian-scan:
+    name: GitGuardian scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # fetch all history so multiple commits can be scanned
+      - name: GitGuardian scan
+        uses: GitGuardian/ggshield/actions/secret@v1.38.0
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
